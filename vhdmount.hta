@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="x-ua-compatible" content="ie=9">
+    <title>VHD Mount & Drive Manager</title>
+    <hta:application 
+        id="vhdMgr" 
+        applicationname="VHDManager" 
+        setBorder="thin" 
+        innerBorder="no" 
+        scroll="no" 
+        singleinstance="yes" 
+        windowstate="normal"
+    >
+    <style>
+        body {
+            font-family: Segoe UI, Tahoma, sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            margin: 0;
+            padding: 25px;
+        }
+        h2 {
+            margin-top: 0;
+            color: #1a73e8;
+            font-size: 24px;
+            border-bottom: 2px solid #dcdcdc;
+            padding-bottom: 10px;
+        }
+        .section {
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        label {
+            font-weight: bold;
+            display: inline-block;
+            margin-bottom: 8px;
+            font-size: 15px;
+        }
+        input[type="text"] {
+            width: 56%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 15px;
+        }
+        select {
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 15px;
+            background-color: #fff;
+            height: 42px;
+        }
+        button {
+            padding: 10px 16px;
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 15px;
+            margin-left: 6px;
+        }
+        button:hover {
+            background-color: #1557b0;
+        }
+        button.danger {
+            background-color: #d93025;
+        }
+        button.danger:hover {
+            background-color: #a51d15;
+        }
+        button.secondary {
+            background-color: #5f6368;
+            float: right;
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        button.secondary:hover {
+            background-color: #3c4043;
+        }
+        #statusBox {
+            margin-top: 10px;
+            padding: 12px;
+            background: #e8f0fe;
+            border-left: 5px solid #1a73e8;
+            font-family: Consolas, monospace;
+            font-size: 13px;
+            height: 120px;
+            overflow-y: auto;
+            text-align: left;
+        }
+    </style>
+
+    <script language="VBScript">
+        Sub InitializeApp()
+            window.resizeTo 680, 730
+            RefreshAllData
+            Log "[System Ready] Application initialized. Run as Administrator recommended."
+        End Sub
+
+        ' Master refresh function for drives and letter assignment
+        Sub RefreshAllData()
+            RefreshDrives
+            RefreshDriveLetterDropdown
+            Log "[Refreshed] System drives and available letters updated."
+        End Sub
+
+        ' Browse File Dialog
+        Sub BrowseVHD()
+            Dim fileInput, filePath
+            Set fileInput = document.getElementById("hiddenFileInput")
+            fileInput.click()
+            filePath = fileInput.value
+            If filePath <> "" Then
+                document.getElementById("vhdPathInput").Value = filePath
+                Log "Selected file via browser: " & filePath
+            End If
+        End Sub
+
+        ' Copy activity log contents to system clipboard
+        Sub CopyLogToClipboard()
+            Dim boxText
+            boxText = document.getElementById("statusBox").innerText
+            window.clipboardData.setData "Text", boxText
+            Log "Activity log copied to clipboard."
+        End Sub
+
+        ' Populate available free drive letters (Scans D to Z for lowest available letter)
+        Sub RefreshDriveLetterDropdown()
+            Dim letterDropdown, ascCode, letterChar, wmi, logicalDisks, disk, usedLetters, optionNode, isFirst
+            Set letterDropdown = document.getElementById("letterDropdown")
+            letterDropdown.innerHTML = ""
+            
+            Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+            Set logicalDisks = wmi.ExecQuery("SELECT DeviceID FROM Win32_LogicalDisk")
+            
+            usedLetters = ""
+            For Each disk in logicalDisks
+                usedLetters = usedLetters & UCase(Left(disk.DeviceID, 1))
+            Next
+            
+            isFirst = True
+            
+            ' Scan from D up to Z (Change to '90 To 68 Step -1' if you prefer highest letter instead)
+            For ascCode = 68 To 90
+                letterChar = Chr(ascCode)
+                If InStr(usedLetters, letterChar) = 0 Then
+                    Set optionNode = document.createElement("OPTION")
+                    optionNode.text = letterChar & ":"
+                    optionNode.value = letterChar
+                    
+                    If isFirst Then
+                        optionNode.selected = True
+                        isFirst = False
+                    End If
+                    
+                    letterDropdown.appendChild(optionNode)
+                End If
+            Next
+        End Sub
+
+        ' Query system drive letters, identify Virtual Disks, and store backing image paths
+        Sub RefreshDrives()
+            Dim shell, wmi, disks, disk, partition, logicalDisk, dropdown, optionNode, isVirtual, driveLetter, imagePath, foundCount
+            Set dropdown = document.getElementById("driveDropdown")
+            dropdown.innerHTML = ""
+            
+            Set shell = CreateObject("WScript.Shell")
+            Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+            
+            Set disks = wmi.ExecQuery("SELECT * FROM Win32_LogicalDisk")
+            foundCount = 0
+
+            For Each logicalDisk in disks
+                driveLetter = logicalDisk.DeviceID
+                isVirtual = False
+                imagePath = ""
+                
+                On Error Resume Next
+                Dim partitions, physicalDisks
+                Set partitions = wmi.ExecQuery("ASSOCIATORS OF {Win32_LogicalDisk.DeviceID='" & driveLetter & "'} WHERE AssocClass = Win32_LogicalDiskToPartition")
+                For Each partition in partitions
+                    Set physicalDisks = wmi.ExecQuery("ASSOCIATORS OF {Win32_DiskPartition.DeviceID='" & partition.DeviceID & "'} WHERE AssocClass = Win32_DiskDriveToDiskPartition")
+                    For Each disk in physicalDisks
+                        If InStr(UCase(disk.Model), "VIRTUAL") > 0 Or InStr(UCase(disk.PNPDeviceID), "VHD") > 0 Then
+                            isVirtual = True
+                            imagePath = disk.Caption
+                        End If
+                    Next
+                Next
+                On Error Goto 0
+
+                Set optionNode = document.createElement("OPTION")
+                If isVirtual Then
+                    optionNode.text = driveLetter & " (Virtual Disk)"
+                    optionNode.style.color = "green"
+                    optionNode.style.fontWeight = "bold"
+                    optionNode.value = driveLetter & "|" & imagePath
+                Else
+                    optionNode.text = driveLetter & " (Standard / Physical)"
+                    optionNode.value = driveLetter & "|"
+                End If
+                
+                dropdown.appendChild(optionNode)
+                foundCount = foundCount + 1
+            Next
+            
+            Log "Refreshed drive list. Found " & foundCount & " logical volumes."
+        End Sub
+
+        ' Mount VHD Handler
+        Sub MountVHD()
+            Dim vhdPath, mountLetter, shell, tempScript, fso, ts
+            vhdPath = document.getElementById("vhdPathInput").Value
+            mountLetter = document.getElementById("letterDropdown").Value
+            
+            If Trim(vhdPath) = "" Then
+                Log "[ERROR] Missing path: Please select or enter a valid VHD file path."
+                Exit Sub
+            End If
+            
+            Set fso = CreateObject("Scripting.FileSystemObject")
+            If Not fso.FileExists(vhdPath) Then
+                Log "[ERROR] File not found: " & vhdPath
+                Exit Sub
+            End If
+            
+            tempScript = shellExpPath("%TEMP%") & "\vhd_mount.txt"
+            Set ts = fso.CreateTextFile(tempScript, True)
+            ts.WriteLine("select vdisk file=" & Chr(34) & vhdPath & Chr(34))
+            ts.WriteLine("attach vdisk")
+            If mountLetter <> "" Then
+                ts.WriteLine("assign letter=" & mountLetter)
+            End If
+            ts.Close
+            
+            Log "Executing DiskPart command: select vdisk file=" & vhdPath
+            Log "Executing DiskPart command: attach vdisk"
+            If mountLetter <> "" Then
+                Log "Executing DiskPart command: assign letter=" & mountLetter
+            End If
+            
+            Set shell = CreateObject("WScript.Shell")
+            shell.Run "diskpart /s " & Chr(34) & tempScript & Chr(34), 0, True
+            
+            If fso.FileExists(tempScript) Then fso.DeleteFile tempScript
+            
+            Log "[OK] Virtual disk attached successfully: " & vhdPath
+            RefreshAllData
+        End Sub
+
+        ' Unmount VHD Handler automatically matching the selected path
+        Sub UnmountSelectedDrive()
+            Dim dropdown, selectedValue, parts, selectedDrive, targetPath, fso, shell, tempScript, ts
+            Set dropdown = document.getElementById("driveDropdown")
+            selectedValue = dropdown.Value
+            
+            If selectedValue = "" Then
+                Log "[ERROR] No drive selected from the dropdown."
+                Exit Sub
+            End If
+            
+            parts = Split(selectedValue, "|")
+            selectedDrive = parts(0)
+            targetPath = parts(1)
+            
+            If targetPath = "" Then
+                Log "[WARNING] Could not automatically map backing path for " & selectedDrive & ". Falling back to input box."
+                targetPath = InputBox("Enter backing VHD path for " & selectedDrive & ":", "Unmount VHD", document.getElementById("vhdPathInput").Value)
+            End If
+            
+            If Trim(targetPath) = "" Then
+                Log "[CANCELLED] Unmount operation cancelled due to empty path."
+                Exit Sub
+            End If
+
+            Set fso = CreateObject("Scripting.FileSystemObject")
+            tempScript = shellExpPath("%TEMP%") & "\vhd_unmount.txt"
+            Set ts = fso.CreateTextFile(tempScript, True)
+            ts.WriteLine("select vdisk file=" & Chr(34) & targetPath & Chr(34))
+            ts.WriteLine("detach vdisk")
+            ts.Close
+
+            Log "Executing DiskPart command: select vdisk file=" & targetPath
+            Log "Executing DiskPart command: detach vdisk"
+
+            Set shell = CreateObject("WScript.Shell")
+            shell.Run "diskpart /s " & Chr(34) & tempScript & Chr(34), 0, True
+            
+            If fso.FileExists(tempScript) Then fso.DeleteFile tempScript
+            
+            Log "[OK] Virtual disk detached successfully from " & selectedDrive
+            RefreshAllData
+        End Sub
+
+        Function shellExpPath(pathStr)
+            Dim sh
+            Set sh = CreateObject("WScript.Shell")
+            shellExpPath = sh.ExpandEnvironmentStrings(pathStr)
+        End Function
+
+        Sub Log(txt)
+            Dim box
+            Set box = document.getElementById("statusBox")
+            box.innerHTML = box.innerHTML & "[" & Time & "] " & txt & "<br>"
+            box.scrollTop = box.scrollHeight
+        End Sub
+    </script>
+</head>
+<body onload="InitializeApp()">
+
+    <h2>VHD Mount & Drive Manager</h2>
+
+    <!-- Hidden file input element used to trigger the standard file browse dialog window -->
+    <input type="file" id="hiddenFileInput" style="display:none;" onchange="document.getElementById('vhdPathInput').value=this.value">
+
+    <!-- Mount Section -->
+    <div class="section">
+        <label>Select VHD File to Mount:</label><br>
+        <input type="text" id="vhdPathInput" placeholder="C:\Path\To\Disk.vhd">
+        <button onclick="BrowseVHD()">Browse...</button>
+        <br><br>
+        <label>Assign Drive Letter:</label>
+        <select id="letterDropdown" style="width: 100px; margin-right: 10px;"></select>
+        <button onclick="MountVHD()">Mount VHD</button>
+    </div>
+
+    <!-- Drive Inspection & Unmount Section -->
+    <div class="section">
+        <label>System Drives (Virtual Disks Highlighted):</label>
+        <select id="driveDropdown" style="width: 65%;"></select>
+        <button class="danger" onclick="UnmountSelectedDrive()">Unmount Selected</button>
+        <br><br>
+        <button onclick="RefreshAllData()" style="background-color: #5f6368; width: 100%;">Refresh Drive List</button>
+    </div>
+
+    <!-- Status Output Console -->
+    <div class="section" style="padding: 12px;">
+        <label>Activity Log:</label>
+        <button class="secondary" onclick="CopyLogToClipboard()">Copy Log</button>
+        <div id="statusBox"></div>
+    </div>
+
+</body>
+</html>
